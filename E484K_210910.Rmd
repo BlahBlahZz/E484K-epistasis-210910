@@ -7,8 +7,6 @@ editor_options:
   chunk_output_type: console
 ---
 
-## Getting results
-
 ### Load Packages
 
 ```{r load packages, message = FALSE}
@@ -23,12 +21,14 @@ library(castor)
 library(phangorn)
 # plotting
 library(ggplot2)
+library(ggpubr)
 library(ggExtra)
 library(gridExtra)
 library(RColorBrewer)
 # statistical testing
 library(corrplot)
 ```
+
 
 ### Import data
 
@@ -51,7 +51,7 @@ is.binary(tree) # FALSE: not fully resolved
 
 #### NextClade Variant Calling
 
-```{r import NextStrain Subsample NextClade Variant Calling, message = FALSE}
+```{r import NextStrain Subsample NextClade Variant Calling}
 # read in the NextClade csv
 sequence <- read_csv2("nextclade_210910.csv")
 
@@ -84,7 +84,7 @@ sequence <- sequence %>%
 
 #### Patient Metadata
 
-```{r import NextStrain Subsample Patient Metadata, message = FALSE}
+```{r import NextStrain Subsample Patient Metadata}
 # problem(read_tsv("nextstrain_patient_meta_210910.tsv"))
 # format of `Collection date` at line 208 (2021-05-7) and line 2401 (2021-06-1) is wrong
 # change to line 208 (2021-05-07) and line 2401 (2021-06-01) in the .tsv file
@@ -94,6 +94,7 @@ meta <- read_tsv("nextstrain_patient_meta_210910.tsv")
 # check basics
 dim(meta) # (3442, 17) -- missing sequences for 7/3449 of tree tips/samples
 ```
+
 
 ### Match sequence names with tree tip names & remove tree tips with no sequence or meta info
 
@@ -106,7 +107,7 @@ sequence <- sequence %>%
             mutate(Accession_ID = str_extract(.$Accession_ID, "EPI_ISL_\\d*")) %>% # meta
             select(GISAID_ID, seqName, Accession_ID, variant, mutation)
 # check 1
-length(intersect(tree$tip.label, sequence$seqName)) # 2910 matches
+length(intersect(tree$tip.label, sequence$seqName)) # 3449 matches
 # find names only in tree tip label
 only_tree <- data.frame(tree_lab = setdiff(tree$tip.label, sequence$seqName))
 only_tree <- only_tree %>% arrange(tree_lab)
@@ -250,178 +251,229 @@ sequence <- sequence %>%
                    mutation, `Collection date`, Location)
 ```
 
+
+### Samples Characteristics
+
+#### Time distribution of sequences
+
+```{r}
+# find the time span of the NextStrain subsample
+summary(sequence$`Collection date`)
+#         Min.      1st Qu.       Median         Mean      3rd Qu.         Max. 
+# "2019-12-26" "2021-01-21" "2021-05-28" "2021-03-26" "2021-07-09" "2021-09-03"
+```
+
+#### THESIS TAB 1
+
+```{r}
+# distribution of E484 mutations in samples and in variants
+
+# proportion of E484 mutations in the NextStrain subsample
+rbind(table(E484$AA), round(prop.table(table(E484$AA))*100, 1))
+
+# find the proportion of each variants in each variant
+basic <- cbind(c("20I", "20H", "21A, 21I, 21J", "21C", "21D", "20J", "21F", "21B", 
+                 "21G", "21H", "other"),
+               table(sequence$variant),
+               round(prop.table(table(sequence$variant))*100, 1),
+               table(sequence$variant, E484$AA)[, 3],
+               round(prop.table(table(sequence$variant, E484$AA), margin = 1)*100, 1)[, 3]) %>%
+         data.frame()
+colnames(basic) <- c("Nextstrain Clade", "Sample Count", "Sample Proportion", 
+                     "E484K Count", "E484K Proportion")
+
+basic
+
+# output table to a csv file
+# write.csv(basic, file = "basic.csv", row.names = TRUE)
+
+# geographical distribution of E484K - Continent
+E484_clade %>% filter(ancestor_state == "K") %>% .$Continent %>% table() %>% prop.table() * 100
+E484_clade %>% filter(ancestor_state == "Q") %>% .$Continent %>% table() %>% prop.table() * 100
+E484_clade %>% filter(ancestor_state == "A") %>% .$Continent %>% table() %>% prop.table() * 100
+
+# geographical distribution of E484K - Country
+E484_clade %>% filter(ancestor_state == "K") %>% .$Country %>% table() %>% prop.table() * 100
+E484_clade %>% filter(ancestor_state == "Q") %>% .$Country %>% table() %>% prop.table() * 100
+E484_clade %>% filter(ancestor_state == "A") %>% .$Country %>% table() %>% prop.table() * 100
+```
+
+
 ### E484 Ancestral State Reconstruction
 
-#### Create numeric vector for E484 status of each sequence
+#### Create a function for ASR and clade identification for specific AA site & ref
 
-```{r E484 vectors for mutations}
-E484 <- sequence$mutation # E484 now has all mutations in each sequence
-# sum(is.na(E484)) # 8 NAs = 8 sequences with 0 mutations
-E484 <- ifelse(is.na(E484), "E", E484) # no mutation = "E" on amino acid number 484
-# sum(is.na(E484)) # check: 0 NA
-# sum(str_detect(E484, "(S:E484)([A-Z])")) # 494 sequences have substitution (any amino acid) on site 484
-E484 <- ifelse(str_detect(E484, "(S:E484)([A-Z])"), 
-               str_match(E484, "(S:E484)([A-Z])")[, 3], # if mutation, extract the substitution
-               "E") # if no "E484" mutation pattern found = "E" on site 484
-# sum(E484 != "E") # check: 494 matches
-rbind(table(E484), prop.table(table(E484))) # calculate substitution patterns on E484
-
-# create numeric vector of tip mutation for ASR
-E484 <- data.frame(E484)
-names(E484) <- "AA"
-    # E484A, E484K, E484Q
-E484 <- E484 %>% mutate(indAA = case_when(AA == "A" ~ 1,
-                                          AA == "E" ~ 2, 
-                                          AA == "K" ~ 3,
-                                          AA == "Q" ~ 4))
-E484_int <- as.integer(E484$indAA) # E484 for backup, E484_int for ASR: 1, 2, 3, 4
-rbind(table(E484_int), prop.table(table(E484_int))) # check
-
-# assigned matched names to E484_int for ASR
-# identical(sequence$seqName, tree$tip.label) # TRUE: order and labels are the same
-names(E484_int) <- sequence$seqName
-identical(names(E484_int), tree$tip.label) # TRUE
-```
-
-#### E484 Ancestral State Reconstruction
-
-```{r E484 Ancestral State Reconstruction}
-# ASR with castor::asr_mk_model()
-E484_ASR_mk <- asr_mk_model(tree, E484_int, Nstates = 4, rate_model = "ER", 
-                            include_ancestral_likelihoods = TRUE, check_input = TRUE)
-# dim(E484_ASR_mk$ancestral_likelihoods) # 2801 nodes * 4 states
-E484_likelihood_mk <- E484_ASR_mk$ancestral_likelihoods
-# from probabilities to states for internal nodes
-E484_states <- c("A", "E", "K", "Q")
-E484_mk <- NaN
-for (i in 1:dim(E484_likelihood_mk)[1]){
-  E484_mk[i] = E484_states[which.max(E484_likelihood_mk[i, ])]
-  # max probability = state of internal nodes
-}
-table(E484_mk, useNA = "ifany") # E(2369) K(421) Q(11) = state count of internal nodes
-```
-
-#### E484 Clade Identification
-
-```{r identify clades based on E484 ASR}
-# data frame: store the most-recent common ancestor information for each tip
-clade <- data.frame(tip_label = names(E484_int),
-                    # tip labels in format "hCoV-19/AREA/SEQUENCE/YEAR"
-                    tip_node = 1:Ntip(tree), # node number of tips
-                    tip_state = E484$AA, # "E, K, Q, R" state of tree tip
-                    ancestor_node = NaN, # will hold ancestor node
-                    ancestor_state = NaN, # will hold ASR ancestor node
-                    row.names = NULL)
-
-# vector of G204 state on all tips and internal nodes (tips followed by nodes)
-E484_tip_and_node <- c(E484$AA, E484_mk)
-
-# find the oldest ancestor (deepest node with the same state) for each tip
-for (tip in clade$tip_node){ 
-  # will hold the node number of the oldest ancestor with the same mutation
-  find = NaN 
-  # loop over and check all ancestors (not just parent) of a tip
-  for (ancestor in Ancestors(tree, tip, type = "all")){ 
-    # if ancestor node state from ASR = tip state
-    if (E484_mk[ancestor-Ntip(tree)] == E484$AA[tip]){ 
-      # update ancestor if the state of the ancestor node is the same as the tip
-      find = ancestor 
-    } else{break}
+```{r function for Ancestral State Reconstruction and clade identification}
+find.clade <- function(site, ref){
+  
+  # vector of mutation represented by AA
+  mut_vec <- sequence$mutation # all mutations
+  mut_vec <- ifelse(is.na(mut_vec), ref, mut_vec) # no mutation (NA) = ref
+  mut_vec <- ifelse(str_detect(mut_vec, paste0("(", site, ")", "([A-Z|-])")), 
+                    str_match(mut_vec, paste0("(", site, ")", "([A-Z|-])"))[, 3],
+                    # if mutation, extract the substitution
+                    ref) # if no mutation pattern found = ref
+  
+  # vector of mutation represented by integer
+  mut_vec <- data.frame(mut_vec)
+  names(mut_vec) <- "AA"
+  mut_vec <- mut_vec %>% mutate(indAA = AA)
+  mut_state <- levels(factor(mut_vec$AA))
+  for (s in c(1:length(mut_state))){
+    mut_vec$indAA <- ifelse(mut_vec$AA == mut_state[s], s, mut_vec$indAA)
   }
-  # if no ancestor matches, use the tip itself
-  find <- ifelse(is.na(find), tip, find)
-  # match the ancestor and the corresponding tip
-  clade$ancestor_node[which(clade$tip_node == tip)] <- find 
-  # fill in the ASR state of the ancestor
-  clade$ancestor_state[which(clade$tip_node == tip)] <- ifelse(find == tip, # if tip itself
-                                                               E484$AA[find], # tip state
-                                                               E484_mk[find-Ntip(tree)])
-                                                               # ancestor state
+  mut_int <- as.integer(mut_vec$indAA)
+  # summary of mutation in sample
+  print(table(mut_vec))
+  
+  # assigned matched names to vector for ASR
+  names(mut_int) <- sequence$seqName
+  # sanity check
+  print(paste0("names matched: ", identical(names(mut_int), tree$tip.label)))
+  
+  # ASR with castor::asr_mk_model()
+  mut_ASR_mk <- asr_mk_model(tree, mut_int, Nstates = length(mut_state), 
+                             rate_model = "ER", 
+                             include_ancestral_likelihoods = TRUE, 
+                             check_input = TRUE)
+  
+  if (is.null(mut_ASR_mk$ancestral_likelihoods)){
+    print(paste0("ASR FAILED: ", site))
+  } else{
+    # maximal likelihood chosen as states for internal nodes
+    mut_likelihood_mk <- mut_ASR_mk$ancestral_likelihoods
+    mut_mk <- NaN
+    for (i in 1:dim(mut_likelihood_mk)[1]){
+      mut_mk[i] = mut_state[which.max(mut_likelihood_mk[i, ])]
+    }
+    # summary of mutation in ASR nodes
+    print(table(mut_mk, useNA = "ifany"))
+    
+    # vector of AA state on all tips and internal nodes (tips followed by nodes)
+    mut_tip_and_node <- c(mut_vec$AA, mut_mk)
+    
+    # find clades: store the most-recent common ancestor information for each tip
+    clade_mut <- data.frame(tip_label = sequence$seqName,
+                            tip_node = 1:Ntip(tree), # node number of tips
+                            tip_state = mut_vec$AA, # AA state of tree tip
+                            ancestor_node = NaN, # will hold ancestor node
+                            ancestor_state = NaN, # will hold ASR ancestor node
+                            row.names = NULL)
+    # find the oldest ancestor (deepest node with the same state) for each tip
+    for (tip in clade_mut$tip_node){ 
+      # will hold the node number of the oldest ancestor with the same mutation
+      find = NaN 
+      # loop over and check all ancestors (not just parent) of a tip
+      for (ancestor in Ancestors(tree, tip, type = "all")){ 
+        # if ancestor node state from ASR = tip state
+        if (mut_tip_and_node[ancestor] == mut_tip_and_node[tip]){ 
+          # update ancestor if the state of the ancestor node is the same as the tip
+          find = ancestor 
+        } else{break}
+      }
+      # if no ancestor matches, use the tip itself
+      find <- ifelse(is.na(find), tip, find)
+      # match the ancestor and the corresponding tip
+      clade_mut$ancestor_node[which(clade_mut$tip_node == tip)] <- find 
+      # fill in the ASR state of the ancestor
+      clade_mut$ancestor_state[which(clade_mut$tip_node == tip)] <- mut_tip_and_node[find]
+    }
+    # sanity check
+    print(paste0("ancestor matched: ", identical(clade_mut$tip_state, 
+                                            clade_mut$ancestor_state)))
+    
+    # characterize each clade: size, time of emergence, duration
+    clade_mut <- clade_mut %>% 
+           # size is number of descending tips from each ancestor
+           group_by(ancestor_node) %>%
+           mutate(size = n()) %>%  
+           ungroup() %>% 
+           # reorder by AA state of emergence, then by clade size
+           select(ancestor_state, ancestor_node, size, tip_node, tip_label) %>%
+           arrange(ancestor_state, desc(size)) %>%
+           # merge with sequence via tip_label=seqName for sample collection info
+           left_join(sequence, by = c("tip_label" = "seqName")) %>%
+           # find the earliest and latest sample collection date of each clade
+           group_by(ancestor_node) %>% 
+           mutate(earliest = min(`Collection date`, na.rm = TRUE)) %>%
+           mutate(latest = max(`Collection date`, na.rm = TRUE)) %>%
+           mutate(duration = as.numeric(latest - earliest)) %>%
+           # find time between samples and the earliest sample (2019-12-26)
+           ungroup() %>% 
+           # unit = day
+           mutate(tip_date_day = `Collection date` - ymd("2019-12-26")) %>%
+           # unit = week
+           mutate(tip_date_week = time_length(tip_date_day, "weeks")) %>%
+           # unit = month
+           mutate(tip_date_month = time_length(tip_date_day, "months")) %>%
+           mutate(tip_date_day = as.numeric(tip_date_day)) %>%
+           # add info of which position the mutation is on
+           mutate(mut_pos = site) %>%
+           # select useful info
+           select(mut_pos, ancestor_state, ancestor_node, size, tip_node, tip_label,
+                  variant, mutation, `Collection date`, earliest, duration, Location,
+                  tip_date_day, tip_date_week)
+    
+    # find and characterize emergence events
+    emerge_mut <- clade_mut %>% 
+            # number of emergence for each AA state
+            select(ancestor_state, ancestor_node, size) %>%
+            unique() %>%
+            group_by(ancestor_state) %>%
+            mutate(times = n()) %>%
+            ungroup() %>%
+            arrange(ancestor_state) %>% 
+            mutate(tips = NaN) %>%
+            select(ancestor_state, times, ancestor_node, size, tips)
+    # find the descending tips from each emergence
+    for (anc in emerge_mut$ancestor_node) {
+      emerge_mut$tips[which(emerge_mut$ancestor_node == anc)] <- clade_mut %>%
+        filter(ancestor_node == anc) %>%
+        select(tip_node) %>% unique() %>%
+        .$tip_node %>% toString()
+    }
+    # reorder by emergence frequency, then by clade size
+    emerge_mut <- emerge_mut %>% arrange(desc(times), desc(size))
+    # add time information to emerge
+    temp <- clade_mut %>%
+            group_by(ancestor_node) %>%
+            select(mut_pos, ancestor_node, earliest, duration) %>%
+            unique() %>% ungroup()
+    emerge_mut <- emerge_mut %>%
+      full_join(temp, by = "ancestor_node") %>%
+      select(mut_pos, ancestor_state, times, ancestor_node, 
+             size, earliest, duration, tips)
+    rm(temp)
+    
+    # output mutation, clades and emergence information
+    return(list(nodeAA = mut_tip_and_node, clade = clade_mut, emerge = emerge_mut))
+  }
 }
-
-# check: should be the same
-identical(clade$tip_state, clade$ancestor_state) # TRUE
 ```
 
-### Characterize E484 ASR clades
+#### E484 ASR & Clade Identification
 
-#### Size, duration, earliest sample, lastest sample of a clade
+```{r}
+# structure of output:
+#   $nodeAA - character vector of AA state on tips & at nodes
+#   $clade - data frame of tips specifying which clade they belong to
+#   $emerge - data frame of emergence/ ancestor nodes (reference + mutated)
 
-```{r E484 clade characteristics}
-# find size of each clade defined by number of descending tips
-clade <- clade %>% 
-         group_by(ancestor_node) %>%
-         mutate(size = n()) %>% 
-         ungroup()
-
-# number of emergence of each state and related clade information
-emerge <- clade %>% 
-          # filter(ancestor_node > Ntip(tree)) %>% # exclude tips, keep only internal nodes
-          select(ancestor_state, ancestor_node, size) %>%
-          unique() %>%
-          group_by(ancestor_state) %>%
-          mutate(times = n()) %>% # number of emergence for each state
-          ungroup() %>%
-          arrange(ancestor_state) %>% 
-          mutate(tips = NaN) %>%
-          select(ancestor_state, times, ancestor_node, size, tips) # reorder the columns
-
-# store and join the descending tips information
-for (anc in emerge$ancestor_node) {
-  emerge$tips[which(emerge$ancestor_node == anc)] <- clade %>% 
-                                                     filter(ancestor_node == anc) %>%
-                                                     select(tip_node) %>% unique() %>%
-                                                     .$tip_node %>% toString()
-}
-
-# reorder: most frequently emerging substitution -> largest clade size
-emerge <- emerge %>% arrange(desc(times), desc(size))
-clade <- clade %>% 
-         select(ancestor_state, ancestor_node, size, tip_node, tip_label) %>%
-         arrange(ancestor_state, desc(size))
-
-# merge clade with sequence via tip_label=seqName, keep Accession_ID and mutation
-clade <- clade %>% left_join(sequence, by = c("tip_label" = "seqName"))
-
-# find the earliest and latest sample collection date of each clade
-clade <- clade %>%
-         group_by(ancestor_node) %>% 
-         mutate(earliest = min(`Collection date`, na.rm = TRUE)) %>%
-         mutate(latest = max(`Collection date`, na.rm = TRUE)) %>%
-         mutate(duration = as.numeric(latest - earliest)) %>%
-         # how long a clade lasted in day
-         ungroup() %>% 
-         mutate(tip_date_day = `Collection date` - ymd("2019-12-26")) %>%
-         # day since earliest
-         mutate(tip_date_week = time_length(tip_date_day, "weeks")) %>%
-         # week since earliest
-         mutate(tip_date_month = time_length(tip_date_day, "months")) %>%
-         # month since earliest
-         mutate(tip_date_day = as.numeric(tip_date_day)) 
-
-# add time information to emerge
-temp <- clade %>%
-        group_by(ancestor_node) %>%
-        select(ancestor_node, earliest, latest, duration) %>%
-        unique() %>%
-        ungroup()
-emerge <- emerge %>%
-          full_join(temp, by = "ancestor_node")
-rm(temp)
+E484 <- find.clade("S:E484", "E")
 ```
 
 #### E484 Reference and Mutated Clades
 
 ```{r}
 # clades with no E484 mutation
-E_clade <- clade %>% filter(ancestor_state == "E")
-E_emerge <- emerge %>% filter(ancestor_state == "E")
+E_clade <- E484$clade %>% filter(ancestor_state == "E")
+E_emerge <- E484$emerge %>% filter(ancestor_state == "E")
 
 # clades with any E484 mutation
-E484_clade <- clade %>% filter(ancestor_state != "E")
-E484_emerge <- emerge %>% filter(ancestor_state != "E")
+E484_clade <- E484$clade %>% filter(ancestor_state != "E")
+E484_emerge <- E484$emerge %>% filter(ancestor_state != "E")
 
-# area of emergence of E484-mutated clades
+# find region where E484-mutated clades emerges
 # function to extract continent information from Location
 continent <- function(x) {  
   str_split(x, "/") [[1]][1] %>% trimws(which = "both")
@@ -435,31 +487,158 @@ country <- function(x) {
 E484_clade$Country <- sapply(E484_clade$Location, country)
 ```
 
-### Standardized E484K Emergence
 
-```{r standardized distribution of emergence over time}
-# find E484K tips that are not the first sample of a E484K clade
-later_K <- E484_clade %>% 
-           filter(ancestor_state == "K") %>%
-           group_by(ancestor_node) %>%
-           filter(`Collection date` != earliest) %>%
-           ungroup() %>%
-           .$tip_node
+### E484K Clade Characteristics
 
-# all other nodes and tips (E, E484K, E484A, E484Q)
-# excluding E484K tips that are not the first sample of a E484K clade
-clade_first_K <- clade %>%
-                 filter(!(tip_node %in% later_K)) %>%
-                 mutate(ind_K = relevel(as.factor(ifelse(ancestor_state == "K", 1, 0)),
-                                        ref = "0")) # indicator for E484K mutation (0)
+#### Statistics of E484 clades (size > 1)
 
-# create categorical time for each two-week period
-# summary(clade_first_K$tip_date_week) # range = (0, 88.14)
-clade_first_K$tip_date_biweek <- cut(clade_first_K$tip_date_week,
+```{r}
+# size summary of E484-mutated clades (size > 1)
+summary(E484_emerge[which(E484_emerge$size >= 2), ]$size)
+#    Min.   1st Qu. Median   Mean  3rd Qu.  Max.
+#    2.00    2.75   10.00   39.92   40.75  209.00
+
+# duration summary of E484-mutated clades (size > 1)
+summary(E484_emerge[which(E484_emerge$size >= 2), ]$duration)
+#    Min.   1st Qu. Median   Mean  3rd Qu.  Max. 
+#    5.00   43.25  112.50  130.75  192.75  303.00 
+
+# geographical distribution of sequences for each E484 clade - Continent
+for (loc in E484_emerge$ancestor_node[which(E484_emerge$size > 1)]){
+  tmp <- E484_clade %>% filter(ancestor_node == loc)
+  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
+  print(cbind(table(tmp$Continent), prop.table(table(tmp$Continent)) * 100))
+}
+
+# geographical distribution of sequences for each E484 clade - Country
+for (loc in E484_emerge$ancestor_node[which(E484_emerge$size > 1)]){
+  tmp <- E484_clade %>% filter(ancestor_node == loc)
+  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
+  print(cbind(table(tmp$Country), prop.table(table(tmp$Country)) * 100))
+}
+
+# dominant variants of E484-mutated clades (size > 1)
+E484_clade %>% View() %>% filter(ancestor_state == "K") %>% .$variant %>% table()
+
+E484_clade %>% View()
+```
+
+#### Statistics of E484 singletons (size == 1)
+
+```{r}
+# count of E484-mutated emergence singletons (size == 1)
+sum(E484_emerge$size == 1 & E484_emerge$ancestor_state == "K") # 10
+
+# variant of sequences for each E484 clade - Continent
+E484_clade %>% filter(ancestor_state == "K") %>% filter(size == 1) %>% .$variant %>% table()
+
+# geographical distribution of sequences for each E484 clade - Continent
+for (loc in E484_emerge$ancestor_node[which(E484_emerge$size == 1)]){
+  tmp <- E484_clade %>% filter(ancestor_node == loc)
+  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
+  print(cbind(table(tmp$Continent), prop.table(table(tmp$Continent)) * 100))
+}
+
+# geographical distribution of sequences for each E484 clade - Country
+for (loc in E484_emerge$ancestor_node[which(E484_emerge$size == 1)]){
+  tmp <- E484_clade %>% filter(ancestor_node == loc)
+  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
+  print(cbind(table(tmp$Country), prop.table(table(tmp$Country)) * 100))
+}
+```
+
+#### THESIS FIG 4
+
+```{r}
+# plot time distribution of E484 clades
+E484_clade %>% 
+  arrange(ancestor_state, size) %>%
+  ggplot(aes(x = `Collection date`, y = as.factor(ancestor_node))) +
+  geom_point(aes(color = as.factor(ancestor_state)), size = 3) +
+  scale_colour_manual(name = "E484\nMutation",
+                      values = c("blueviolet", "brown3", "goldenrod2")) +
+  scale_x_date(breaks = c(date("2020-10-01"), date("2020-12-01"),
+                          date("2021-02-01"), date("2021-04-01"), 
+                          date("2021-06-01"), date("2021-08-01")),
+               date_labels = "%Y %b") + 
+  labs(title = "Time Distribution of E484 Mutation Emergence", 
+       x = "Collection Date", y = "Ancestor Node") +
+  theme(text = element_text(size = 24),
+        axis.text.x = element_text(size = 18, hjust = 0),
+        axis.text.y = element_text(size = 18),
+        legend.text = element_text(size = 18))
+```
+
+
+### E484K Standardized Frequency of Emergence
+
+#### Function to Plot Standardized Frequency of Emergence
+
+```{r plot standardized frequency with vaccine label}
+stand.freq.vac <- function(clade, ref, key, color){
+  # find tips that are not the first sample of a clade of key mutation
+  clade_later <- clade %>%
+                 filter(ancestor_state == key) %>%
+                 group_by(ancestor_node) %>%
+                 filter(`Collection date` != earliest) %>%
+                 ungroup() %>%
+                 .$tip_node
+  
+  # find all other nodes and tips
+  # excluding tips that are not the first sample of a clade of key mutation
+  # excluding tips that are not the reference or the key mutation (other mutations)
+  clade_first <- clade %>%
+                 filter(!(tip_node %in% clade_later)) %>%
+                 filter(ancestor_state %in% c(ref, key))
+  
+  # create categorical time for each two-week period, range = (0, 88.14)
+  clade_first$tip_date_biweek <- cut(clade_first$tip_date_week,
                                      breaks=c(seq(0, 90, 2)),
                                      labels=c(seq(1, 45)))
-clade_first_K$tip_date_biweek[which(clade_first_K$tip_date_day == 0)] <- 1
+  clade_first$tip_date_biweek[which(clade_first$tip_date_day == 0)] <- 1
+  
+  # plot standardized emergence by time (fornights since first sample)
+  p <- clade_first %>% 
+       group_by(as.factor(tip_date_biweek)) %>%
+       mutate(biweek_size = n()) %>% # total eligible samples in two weeks
+       mutate(biweek_emerge = sum(ancestor_state == key)) %>% # count emergence
+       mutate(biweek_prop = biweek_emerge / biweek_size) %>%
+       ungroup() %>%
+       ggplot(aes(as.numeric(tip_date_biweek), biweek_prop)) +
+       # ref line: Pfizer BioNTech vaccine authorized
+       geom_vline(aes(xintercept = time_length(ymd("2020-12-11") - ymd("2019-12-26"), "weeks")/2,
+                     color = "Vaccine\nAuthorized"), size = 1.5) +
+       geom_smooth(color = color, size = 1.5) +
+       geom_point(color = color, size = 3) +
+       scale_x_continuous(limits = c(0, 48), breaks = seq(0, 48, 4),
+                          labels = c("2019 Dec 26", "2020 Feb 20", "2020 Apr 16", 
+                                     "2020 Jun 11", "2020 Aug 06", "2020 Oct 01",
+                                     "2020 Nov 26", "2021 Jan 21",
+                                     "2021 Mar 18", "2021 May 13", "2021 Jul 08", 
+                                     "2021 Sep 02", "2021 Oct 28")) +
+       scale_y_continuous(limits = c(0, 0.08)) +
+       scale_color_manual(values = c("Vaccine\nAuthorized" = "bisque4"), name = "")  +
+       labs(x = "Time of Emergence (Two Weeks)",
+            y = "Standardized Frequency of Emergence",
+            title = "Standardized Emergence by Time") +
+       labs(x = "",
+            y = "",
+            title = "") +
+       theme(text = element_text(size = 14),
+             axis.text.x = element_text(size = 14, angle = 30, hjust = 1),
+             axis.text.y = element_text(size = 14))
+  
+  return(p)
+}
 ```
+
+#### THESIS FIG 5
+```{r}
+# Plot E484K standardized frequency of emergence
+E484K_stand_fig5 <- stand.freq.vac(E484$clade, "E", "K", "indianred1")
+E484K_stand_fig5
+```
+
 
 ### Genetic Background of E484 Clades (Proportion of Other Mutations)
 
@@ -490,9 +669,9 @@ key_mut <- other %>% filter(proportion >= 0.1)
 # define a function to calculate the proportion of specified mutations in each E484K clade
 clade_prop <- function(ancestor){
                       # calculate the size of clade descending from an ancestor node
-                      size <- emerge$size[which(emerge$ancestor_node == ancestor)]
+                      size <- E484$emerge$size[which(E484$emerge$ancestor_node == ancestor)]
                       # calculate the proportion of other mutations in this clade
-                      prop <- clade %>% 
+                      prop <- E484$clade %>% 
                               filter(ancestor_node == ancestor) %>%
                               select(mutation) %>% 
                               mutate(single = str_split(mutation, ",")) %>% 
@@ -545,571 +724,7 @@ key_mut_E <- key_mut_E %>% .[ , c(1, 4, 5)] # keep necessary info to merge to ke
 names(key_mut_E) <- c("single", "clade_3443_E", "clade_3691_E")
 ```
 
-### Epistasis with S:N501Y, S:R203K, N:G204R
-
-#### S:N501
-
-```{r N501 vectors for mutations}
-N501 <- sequence$mutation # N501 now has all mutations in each sequence
-# sum(is.na(N501)) # 8 NAs = 8 sequences with 0 mutations
-N501 <- ifelse(is.na(N501), "N", N501) # no mutation = "N" on amino acid number 501
-# sum(is.na(N501)) # check: 0 NA
-# sum(str_detect(N501, "(S:N501)([A-Z])")) # 896 sequences have substitution (any amino acid) on site 501
-N501 <- ifelse(str_detect(N501, "(S:N501)([A-Z])"), 
-               str_match(N501, "(S:N501)([A-Z])")[, 3], # if mutation, extract the substitution
-               "N") # if no "N501" mutation pattern found = "N" on site 501
-# sum(N501 != "N") # check: 701 matches
-rbind(table(N501), prop.table(table(N501))) # calculate substitution patterns on N501
-
-# create numeric vector of tip mutation for ASR
-N501 <- data.frame(N501)
-names(N501) <- "AA"
-      # N501S, N501T, N501Y
-N501 <- N501 %>% mutate(indAA = case_when(AA == "N" ~ 1,
-                                          AA == "S" ~ 2, 
-                                          AA == "T" ~ 3,
-                                          AA == "Y" ~ 4))
-N501_int <- as.integer(N501$indAA) # N501 for backup, N501_int for ASR: 1, 2, 3, 4
-rbind(table(N501_int), prop.table(table(N501_int))) # check
-
-# assigned matched names to N501_int for ASR
-# identical(sequence$seqName, tree$tip.label) # TRUE: order and labels are the same
-names(N501_int) <- sequence$seqName
-identical(names(N501_int), tree$tip.label) # TRUE
-```
-
-```{r N501 Ancestral State Reconstruction}
-# ASR with castor::asr_mk_model()
-N501_ASR_mk <- asr_mk_model(tree, N501_int, Nstates = 4, rate_model = "ER", 
-                            include_ancestral_likelihoods = TRUE, check_input = TRUE)
-# dim(N501_ASR_mk$ancestral_likelihoods) # 2801 nodes * 4 states
-N501_likelihood_mk <- N501_ASR_mk$ancestral_likelihoods
-# from probabilities to states for internal nodes
-N501_states <- c("N", "S", "T", "Y")
-N501_mk <- NaN
-for (i in 1:dim(N501_likelihood_mk)[1]){
-  N501_mk[i] = N501_states[which.max(N501_likelihood_mk[i, ])]
-  # max probability = state of internal nodes
-}
-table(N501_mk, useNA = "ifany") # N(2015) T(4) Y(782) = state count of internal nodes
-```
-
-```{r identify clades based on N501 ASR}
-# data frame: store the most-recent common ancestor information for each tip
-clade_N501 <- data.frame(tip_label = names(N501_int),
-                         # tip labels in format "hCoV-19/AREA/SEQUENCE/YEAR"
-                         tip_node = 1:Ntip(tree), # node number of tips
-                         tip_state = N501$AA, # "E, K, Q, R" state of tree tip
-                         ancestor_node = NaN, # will hold ancestor node
-                         ancestor_state = NaN, # will hold ASR ancestor node
-                         row.names = NULL)
-
-# vector of N501 state on all tips and internal nodes (tips followed by nodes)
-N501_tip_and_node <- c(N501$AA, N501_mk)
-
-# find the oldest ancestor (deepest node with the same state) for each tip
-for (tip in clade_N501$tip_node){ 
-  # will hold the node number of the oldest ancestor with the same mutation
-  find = NaN 
-  # loop over and check all ancestors (not just parent) of a tip
-  for (ancestor in Ancestors(tree, tip, type = "all")){ 
-    # if ancestor node state from ASR = tip state
-    if (N501_tip_and_node[ancestor] == N501_tip_and_node[tip]){ 
-      # update ancestor if the state of the ancestor node is the same as the tip
-      find = ancestor 
-    } else{break}
-  }
-  # if no ancestor matches, use the tip itself
-  find <- ifelse(is.na(find), tip, find)
-  # match the ancestor and the corresponding tip
-  clade_N501$ancestor_node[which(clade_N501$tip_node == tip)] <- find 
-  # fill in the ASR state of the ancestor
-  clade_N501$ancestor_state[which(clade_N501$tip_node == tip)] <- N501_tip_and_node[find]
-}
-
-# check: should be the same
-identical(clade_N501$tip_state, clade_N501$ancestor_state) # TRUE
-```
-
-```{r N501 clade characteristics}
-# size of each clade approximated by number of descending tips
-clade_N501 <- clade_N501 %>% 
-         group_by(ancestor_node) %>%
-         mutate(size = n()) %>% 
-         ungroup()
-
-# number of emergence of each state and related clade information
-emerge_N501 <- clade_N501 %>% 
-          # filter(ancestor_node > Ntip(tree)) %>% # exclude tips, keep only internal nodes
-          select(ancestor_state, ancestor_node, size) %>%
-          unique() %>%
-          group_by(ancestor_state) %>%
-          mutate(times = n()) %>% # number of emergence for each state
-          ungroup() %>%
-          arrange(ancestor_state) %>% 
-          mutate(tips = NaN) %>%
-          select(ancestor_state, times, ancestor_node, size, tips) # reorder the columns
-
-# store and join the descending tips information
-for (anc in emerge_N501$ancestor_node) {
-  emerge_N501$tips[which(emerge_N501$ancestor_node == anc)] <- clade_N501 %>% 
-                                                     filter(ancestor_node == anc) %>%
-                                                     select(tip_node) %>% unique() %>%
-                                                     .$tip_node %>% toString()
-}
-
-# reorder: most frequently emerging substitution -> largest clade size
-emerge_N501 <- emerge_N501 %>% arrange(desc(times), desc(size))
-clade_N501 <- clade_N501 %>% 
-         select(ancestor_state, ancestor_node, size, tip_node, tip_label) %>%
-         arrange(ancestor_state, desc(size))
-
-# merge clade with sequence via tip_label=seqName, keep Accession_ID and mutation
-clade_N501 <- clade_N501 %>% left_join(sequence, by = c("tip_label" = "seqName"))
-```
-
-#### N:R203K
-
-```{r R203 vectors for mutations}
-R203 <- sequence$mutation # R203 now has all mutations in each sequence
-# sum(is.na(R203)) # 8 NAs = 8 sequences with 0 mutations
-R203 <- ifelse(is.na(R203), "R", R203) # no mutation = "R" on amino acid number 203
-# sum(is.na(R203)) # check: 0 NA
-sum(str_detect(R203, "(N:R203)([A-Z]|-)")) # 2538 sequences have substitution (any amino acid) on site 203
-R203 <- ifelse(str_detect(R203, "(N:R203)([A-Z]|-)"), 
-               str_match(R203, "(N:R203)([A-Z]|-)")[, 3], # if mutation, extract the substitution
-               "R") # if no "R203" mutation pattern found = "R" on site 203
-# sum(R203 != "R") # check: 2538 matches
-rbind(table(R203), prop.table(table(R203))) # calculate substitution patterns on R203
-
-# create numeric vector of tip mutation for ASR
-R203 <- data.frame(R203)
-names(R203) <- "AA"
-# R203-, R203I, R203K, R203M, R203S
-R203 <- R203 %>% mutate(indAA = case_when(AA == "-" ~ 1,
-                                          AA == "I" ~ 2, 
-                                          AA == "K" ~ 3,
-                                          AA == "M" ~ 4,
-                                          AA == "R" ~ 5,
-                                          AA == "S" ~ 6))
-R203_int <- as.integer(R203$indAA) # R203 for backup, R203_int for ASR: 1, 2, 3, 4, 5, 6
-rbind(table(R203_int), prop.table(table(R203_int))) # check
-
-# assigned matched names to R203_int for ASR
-# identical(sequence$seqName, tree$tip.label) # TRUE: order and labels are the same
-names(R203_int) <- sequence$seqName
-identical(names(R203_int), tree$tip.label) # TRUE
-```
-
-```{r R203 Ancestral State Reconstruction}
-# ASR with castor::asr_mk_model()
-R203_ASR_mk <- asr_mk_model(tree, R203_int, Nstates = 6, rate_model = "ER", 
-                            include_ancestral_likelihoods = TRUE, check_input = TRUE)
-# dim(R203_ASR_mk$ancestral_likelihoods) # 2801 nodes * 6 states
-R203_likelihood_mk <- R203_ASR_mk$ancestral_likelihoods
-# from probabilities to states for internal nodes
-R203_states <- c("-", "I", "K", "M", "R", "S")
-R203_mk <- NaN
-for (i in 1:dim(R203_likelihood_mk)[1]){
-  R203_mk[i] = R203_states[which.max(R203_likelihood_mk[i, ])]
-  # max probability = state of internal nodes
-}
-table(R203_mk, useNA = "ifany") # K(1095) M(966) R(740) = state count of internal nodes
-```
-
-```{r identify clades based on R203 ASR}
-# data frame: store the most-recent common ancestor information for each tip
-clade_R203 <- data.frame(tip_label = names(R203_int),
-                         # tip labels in format "hCoV-19/AREA/SEQUENCE/YEAR"
-                         tip_node = 1:Ntip(tree), # node number of tips
-                         tip_state = R203$AA, # "G, R, L, P, -" state of tree tip
-                         ancestor_node = NaN, # will hold ancestor node
-                         ancestor_state = NaN, # will hold ASR ancestor node
-                         row.names = NULL)
-
-# vector of R203 state on all tips and internal nodes (tips followed by nodes)
-R203_tip_and_node <- c(R203$AA, R203_mk)
-
-# find the oldest ancestor (deepest node with the same state) for each tip
-for (tip in clade_R203$tip_node){ 
-  # will hold the node number of the oldest ancestor with the same mutation
-  find = NaN 
-  # loop over and check all ancestors (not just parent) of a tip
-  for (ancestor in Ancestors(tree, tip, type = "all")){ 
-    # if ancestor node state from ASR = tip state
-    if (R203_tip_and_node[ancestor] == R203_tip_and_node[tip]){ 
-      # update ancestor if the state of the ancestor node is the same as the tip
-      find = ancestor 
-    } else{break}
-  }
-  # if no ancestor matches, use the tip itself
-  find <- ifelse(is.na(find), tip, find)
-  # match the ancestor and the corresponding tip
-  clade_R203$ancestor_node[which(clade_R203$tip_node == tip)] <- find 
-  # fill in the ASR state of the ancestor
-  clade_R203$ancestor_state[which(clade_R203$tip_node == tip)] <- R203_tip_and_node[find]
-}
-
-# check: should be the same
-identical(clade_R203$tip_state, clade_R203$ancestor_state) # TRUE
-```
-
-```{r R203 clade characteristics}
-# size of each clade approximated by number of descending tips
-clade_R203 <- clade_R203 %>% 
-         group_by(ancestor_node) %>%
-         mutate(size = n()) %>% 
-         ungroup()
-
-# number of emergence of each state and related clade information
-emerge_R203 <- clade_R203 %>% 
-          # filter(ancestor_node > Ntip(tree)) %>% # exclude tips, keep only internal nodes
-          select(ancestor_state, ancestor_node, size) %>%
-          unique() %>%
-          group_by(ancestor_state) %>%
-          mutate(times = n()) %>% # number of emergence for each state
-          ungroup() %>%
-          arrange(ancestor_state) %>% 
-          mutate(tips = NaN) %>%
-          select(ancestor_state, times, ancestor_node, size, tips) # reorder the columns
-
-# store and join the descending tips information
-for (anc in emerge_R203$ancestor_node) {
-  emerge_R203$tips[which(emerge_R203$ancestor_node == anc)] <- clade_R203 %>% 
-                                                     filter(ancestor_node == anc) %>%
-                                                     select(tip_node) %>% unique() %>%
-                                                     .$tip_node %>% toString()
-}
-
-# reorder: most frequently emerging substitution -> largest clade size
-emerge_R203 <- emerge_R203 %>% arrange(desc(times), desc(size))
-clade_R203 <- clade_R203 %>% 
-         select(ancestor_state, ancestor_node, size, tip_node, tip_label) %>%
-         arrange(ancestor_state, desc(size))
-
-# merge clade with sequence via tip_label=seqName, keep Accession_ID and mutation
-clade_R203 <- clade_R203 %>% left_join(sequence, by = c("tip_label" = "seqName"))
-```
-
-#### N:G204R
-
-```{r G204R vectors for mutations}
-G204 <- sequence$mutation # G204 now has all mutations in each sequence
-# sum(is.na(G204)) # 8 NAs = 8 sequences with 0 mutations
-G204 <- ifelse(is.na(G204), "G", G204) # no mutation = "G" on amino acid number 204
-# sum(is.na(G204)) # check: 0 NA
-sum(str_detect(G204, "(N:G204)([A-Z]|-)")) # 1276 sequences have substitution (any amino acid) on site 204
-G204 <- ifelse(str_detect(G204, "(N:G204)([A-Z]|-)"), 
-               str_match(G204, "(N:G204)([A-Z]|-)")[, 3], # if mutation, extract the substitution
-               "G") # if no "G204" mutation pattern found = "G" on site 204
-# sum(G204 != "G") # check: 1276 matches
-rbind(table(G204), prop.table(table(G204))) # calculate substitution patterns on G204
-
-# create numeric vector of tip mutation for ASR
-G204 <- data.frame(G204)
-names(G204) <- "AA"
-# G204-, G204L, G204P, G204R
-G204 <- G204 %>% mutate(indAA = case_when(AA == "-" ~ 1,
-                                          AA == "G" ~ 2, 
-                                          AA == "L" ~ 3,
-                                          AA == "P" ~ 4,
-                                          AA == "R" ~ 5))
-G204_int <- as.integer(G204$indAA) # G204 for backup, G204_int for ASR: 1, 2, 3, 4, 5
-rbind(table(G204_int), prop.table(table(G204_int))) # check
-
-# assigned matched names to G204_int for ASR
-# identical(sequence$seqName, tree$tip.label) # TRUE: order and labels are the same
-names(G204_int) <- sequence$seqName
-identical(names(G204_int), tree$tip.label) # TRUE
-```
-
-```{r G204 Ancestral State Reconstruction}
-# ASR with castor::asr_mk_model()
-G204_ASR_mk <- asr_mk_model(tree, G204_int, Nstates = 5, rate_model = "ER", 
-                            include_ancestral_likelihoods = TRUE, check_input = TRUE)
-# dim(G204_ASR_mk$ancestral_likelihoods) # 2801 nodes * 5 states
-G204_likelihood_mk <- G204_ASR_mk$ancestral_likelihoods
-# from probabilities to states for internal nodes
-G204_states <- c("-", "G", "L", "P", "R")
-G204_mk <- NaN
-for (i in 1:dim(G204_likelihood_mk)[1]){
-  G204_mk[i] = G204_states[which.max(G204_likelihood_mk[i, ])]
-  # max probability = state of internal nodes
-}
-table(G204_mk, useNA = "ifany") # G(1708) L(1) P(32) R(1060) = state count of internal nodes
-```
-
-```{r identify clades based on G204 ASR}
-# data frame: store the most-recent common ancestor information for each tip
-clade_G204 <- data.frame(tip_label = names(G204_int),
-                         # tip labels in format "hCoV-19/AREA/SEQUENCE/YEAR"
-                         tip_node = 1:Ntip(tree), # node number of tips
-                         tip_state = G204$AA, # "G, R, L, P, -" state of tree tip
-                         ancestor_node = NaN, # will hold ancestor node
-                         ancestor_state = NaN, # will hold ASR ancestor node
-                         row.names = NULL)
-
-# vector of G204 state on all tips and internal nodes (tips followed by nodes)
-G204_tip_and_node <- c(G204$AA, G204_mk)
-
-# find the oldest ancestor (deepest node with the same state) for each tip
-for (tip in clade_G204$tip_node){ 
-  # will hold the node number of the oldest ancestor with the same mutation
-  find = NaN 
-  # loop over and check all ancestors (not just parent) of a tip
-  for (ancestor in Ancestors(tree, tip, type = "all")){ 
-    # if ancestor node state from ASR = tip state
-    if (G204_tip_and_node[ancestor] == G204_tip_and_node[tip]){ 
-      # update ancestor if the state of the ancestor node is the same as the tip
-      find = ancestor 
-    } else{break}
-  }
-  # if no ancestor matches, use the tip itself
-  find <- ifelse(is.na(find), tip, find)
-  # match the ancestor and the corresponding tip
-  clade_G204$ancestor_node[which(clade_G204$tip_node == tip)] <- find 
-  # fill in the ASR state of the ancestor
-  clade_G204$ancestor_state[which(clade_G204$tip_node == tip)] <- G204_tip_and_node[find]
-}
-
-# check: should be the same
-identical(clade_G204$tip_state, clade_G204$ancestor_state) # TRUE
-```
-
-```{r G204 clade characteristics}
-# size of each clade approximated by number of descending tips
-clade_G204 <- clade_G204 %>% 
-         group_by(ancestor_node) %>%
-         mutate(size = n()) %>% 
-         ungroup()
-
-# number of emergence of each state and related clade information
-emerge_G204 <- clade_G204 %>% 
-          # filter(ancestor_node > Ntip(tree)) %>% # exclude tips, keep only internal nodes
-          select(ancestor_state, ancestor_node, size) %>%
-          unique() %>%
-          group_by(ancestor_state) %>%
-          mutate(times = n()) %>% # number of emergence for each state
-          ungroup() %>%
-          arrange(ancestor_state) %>% 
-          mutate(tips = NaN) %>%
-          select(ancestor_state, times, ancestor_node, size, tips) # reorder the columns
-
-# store and join the descending tips information
-for (anc in emerge_G204$ancestor_node) {
-  emerge_G204$tips[which(emerge_G204$ancestor_node == anc)] <- clade_G204 %>% 
-                                                     filter(ancestor_node == anc) %>%
-                                                     select(tip_node) %>% unique() %>%
-                                                     .$tip_node %>% toString()
-}
-
-# reorder: most frequently emerging substitution -> largest clade size
-emerge_G204 <- emerge_G204 %>% arrange(desc(times), desc(size))
-clade_G204 <- clade_G204 %>% 
-         select(ancestor_state, ancestor_node, size, tip_node, tip_label) %>%
-         arrange(ancestor_state, desc(size))
-
-# merge clade with sequence via tip_label=seqName, keep Accession_ID and mutation
-clade_G204 <- clade_G204 %>% left_join(sequence, by = c("tip_label" = "seqName"))
-```
-
-
-## Obtaining/ Plotting Results for Thesis
-
-#### Characterize time distribution of samples
-
-```{r}
-# find the time span of the NextStrain subsample
-summary(sequence$`Collection date`)
-#         Min.      1st Qu.       Median         Mean      3rd Qu.         Max. 
-# "2019-12-26" "2021-01-21" "2021-05-28" "2021-03-26" "2021-07-09" "2021-09-03"
-```
-
-#### Table 1: distribution of E484 mutations in samples and in variants
-
-```{r}
-# proportion of E484 mutations in the NextStrain subsample
-rbind(table(E484$AA), round(prop.table(table(E484$AA))*100, 1))
-
-# find the proportion of each variants in each variant
-basic <- cbind(c("20I", "20H", "21A, 21I, 21J", "21C", "21D", "20J", "21F", "21B", 
-                 "21G", "21H", "other"),
-               table(sequence$variant),
-               round(prop.table(table(sequence$variant))*100, 1),
-               table(sequence$variant, E484$AA)[, 3],
-               round(prop.table(table(sequence$variant, E484$AA), margin = 1)*100, 1)[, 3]) %>%
-         data.frame()
-colnames(basic) <- c("Nextstrain Clade", "Sample Count", "Sample Proportion", 
-                     "E484K Count", "E484K Proportion")
-
-basic
-
-# output table to a csv file
-# write.csv(basic, file = "basic.csv", row.names = TRUE)
-
-# geographical distribution of E484K - Continent
-E484_clade %>% filter(ancestor_state == "K") %>% .$Continent %>% table() %>% prop.table() * 100
-E484_clade %>% filter(ancestor_state == "Q") %>% .$Continent %>% table() %>% prop.table() * 100
-E484_clade %>% filter(ancestor_state == "A") %>% .$Continent %>% table() %>% prop.table() * 100
-
-# geographical distribution of E484K - Country
-E484_clade %>% filter(ancestor_state == "K") %>% .$Country %>% table() %>% prop.table() * 100
-E484_clade %>% filter(ancestor_state == "Q") %>% .$Country %>% table() %>% prop.table() * 100
-E484_clade %>% filter(ancestor_state == "A") %>% .$Country %>% table() %>% prop.table() * 100
-```
-
-#### Basic statistics of E484 clades (size > 1)
-
-```{r}
-# size summary of E484-mutated clades (size >= 2)
-summary(E484_emerge[which(E484_emerge$size >= 2), ]$size)
-#    Min.   1st Qu. Median   Mean  3rd Qu.  Max.
-#    2.00    2.75   10.00   39.92   40.75  209.00
-
-# duration summary of E484-mutated clades (size >= 2)
-summary(E484_emerge[which(E484_emerge$size >= 2), ]$duration)
-#    Min.   1st Qu. Median   Mean  3rd Qu.  Max. 
-#    5.00   43.25  112.50  130.75  192.75  303.00 
-
-# geographical distribution of sequences for each E484 clade - Continent
-for (loc in E484_emerge$ancestor_node[which(E484_emerge$size > 1)]){
-  tmp <- E484_clade %>% filter(ancestor_node == loc)
-  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
-  print(cbind(table(tmp$Continent), prop.table(table(tmp$Continent)) * 100))
-}
-
-# geographical distribution of sequences for each E484 clade - Country
-for (loc in E484_emerge$ancestor_node[which(E484_emerge$size > 1)]){
-  tmp <- E484_clade %>% filter(ancestor_node == loc)
-  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
-  print(cbind(table(tmp$Country), prop.table(table(tmp$Country)) * 100))
-}
-```
-
-#### Basic statistics of E484 singletons (size == 1)
-
-```{r}
-# count of E484-mutated emergence singletons (size == 1)
-sum(E484_emerge$size == 1 & E484_emerge$ancestor_state == "K") # 10
-
-# variant of sequences for each E484 clade - Continent
-E484_clade %>% filter(ancestor_state == "K") %>% filter(size == 1) %>% .$variant %>% table()
-
-# geographical distribution of sequences for each E484 clade - Continent
-for (loc in E484_emerge$ancestor_node[which(E484_emerge$size == 1)]){
-  tmp <- E484_clade %>% filter(ancestor_node == loc)
-  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
-  print(cbind(table(tmp$Continent), prop.table(table(tmp$Continent)) * 100))
-}
-
-# geographical distribution of sequences for each E484 clade - Country
-for (loc in E484_emerge$ancestor_node[which(E484_emerge$size == 1)]){
-  tmp <- E484_clade %>% filter(ancestor_node == loc)
-  print(paste0(loc, " ", E484_emerge$ancestor_state[(which(E484_emerge$ancestor_node == loc))]))
-  print(cbind(table(tmp$Country), prop.table(table(tmp$Country)) * 100))
-}
-```
-
-#### Figure 4: time distribution of samples in E484 clades
-
-```{r}
-# Figure 4 - plot time distribution of E484 clades
-E484_clade %>% 
-  arrange(ancestor_state, size) %>%
-  ggplot(aes(x = `Collection date`, y = as.factor(ancestor_node))) +
-  geom_point(aes(color = as.factor(ancestor_state)), size = 3) +
-  scale_colour_manual(name = "E484\nMutation",
-                      values = c("blueviolet", "brown3", "goldenrod2")) +
-  scale_x_date(breaks = c(date("2020-10-01"), date("2020-12-01"),
-                          date("2021-02-01"), date("2021-04-01"), 
-                          date("2021-06-01"), date("2021-08-01")),
-               date_labels = "%Y %b") + 
-  labs(title = "Time Distribution of E484 Mutation Emergence", 
-       x = "Collection Date", y = "Ancestor Node") +
-  theme(text = element_text(size = 24),
-        axis.text.x = element_text(size = 18, hjust = 0),
-        axis.text.y = element_text(size = 18),
-        legend.text = element_text(size = 18))
-```
-
-#### (Not in paper: Size and Duration of clade vs. Time of clade emergence)
-
-```{r Figure 5 to be, eval = FALSE}
-# Figure 5a to be - plot size of clade vs. duration of clade
-sVd <- E484_emerge %>% 
-  ggplot(aes(x = duration, y = size)) +
-  geom_point(aes(color = as.factor(ancestor_state)), size = 6) +
-  scale_colour_manual(name = "E484\nMutation",
-                      values = c("blueviolet", "brown3", "goldenrod2")) +
-  labs(title = "E484-mutated Clade Size vs. Clade Duration", 
-       x = "Clade Duration (day)" , y = "Clade Size") +
-  theme(text = element_text(size = 24),
-        axis.text.x = element_text(size = 18, hjust = 0),
-        axis.text.y = element_text(size = 18),
-        legend.position = "none")
-ggMarginal(sVd, type = "histogram", fill = "lightblue4", color = "grey50", size = 7)
-
-# Figure 5b to be - plot duration of clade vs. time of earliest sample
-E484_emerge %>% 
-  ggplot(aes(x = earliest, y = duration)) +
-  geom_point(aes(size = size, color = as.factor(ancestor_state))) +
-  scale_size_area(name = "Clade\nSize", max_size = 12) +
-  scale_colour_manual(name = "E484\nMutation",
-                      values = c("blueviolet", "brown3", "goldenrod2")) +
-  scale_x_date(breaks = c(date("2020-10-01"), date("2020-12-01"),
-                          date("2021-02-01"), date("2021-04-01"), 
-                          date("2021-06-01"), date("2021-08-01")),
-               date_labels = "%Y %b") +
-  labs(title = "E484-mutated Clade Duration vs. Time of Earliest Sample", 
-       x = "Time of Emergence" , y = "Clade Duration (day)") +
-  theme(text = element_text(size = 24),
-        axis.text.x = element_text(size = 18, hjust = 0),
-        axis.text.y = element_text(size = 18),
-        legend.text = element_text(size = 18))
-
-# calculate the Spearman correlation between size, duration and time
-cor.test(E484_emerge$duration, as.numeric(E484_emerge$earliest - as.Date("2019-12-26")), 
-         method = "spearman", exact = FALSE) # duration & time, ties
-cor.test(E484_emerge$size, as.numeric(E484_emerge$earliest - as.Date("2019-12-26")), 
-         method = "spearman", exact = FALSE) # size & time, ties
-cor.test(E484_emerge$size, E484_emerge$duration, 
-         method = "spearman", exact = FALSE) # size & duration, ties
-```
-
-#### Figure 5: standardized frequencey of E484K emergence
-
-```{r}
-# Figure 5. plot standardized emergence by time (fornights since first sample)
-clade_first_K %>% 
-  filter(ancestor_state %in% c("E", "K")) %>% # remove E484A and E484Q tips (already mutated)
-#  filter(!ancestor_node %in% c(3712, 3681)) %>% # sensitivity analysis: merge 3712 & 3681 to 3611
-  group_by(as.factor(tip_date_biweek)) %>%
-  mutate(biweek_size = n()) %>%
-  mutate(biweek_emerge = sum(ind_K == 1)) %>%
-  mutate(biweek_prop = biweek_emerge / biweek_size) %>%
-  ungroup() %>%
-  ggplot(aes(as.numeric(tip_date_biweek), biweek_prop)) +
-  # ref line: Pfizer BioNTech vaccine authorized
-  geom_vline(aes(xintercept = time_length(ymd("2020-12-11") - ymd("2019-12-26"), "weeks")/2,
-             color = "Vaccine\nAuthorized"), size = 2.5) +
-  geom_smooth(color = "coral3", size = 2.5) +
-  geom_point(color = "brown3", size = 5) +
-  scale_x_continuous(limits = c(0, 48), breaks = seq(0, 48, 4),
-                     labels = c("2019 Dec 26", "2020 Feb 20", "2020 Apr 16", "2020 Jun 11",
-                                "2020 Aug 06", "2020 Oct 01", "2020 Nov 26", "2021 Jan 21",
-                                "2021 Mar 18", "2021 May 13", "2021 Jul 08", "2021 Sep 02",
-                                "2021 Oct 28")) +
-  scale_y_continuous(limits = c(0, 0.1)) +
-  scale_color_manual(values = c("Vaccine\nAuthorized" = "bisque4"), name = "")  +
-  labs(x = "Time of Emergence (Two Weeks)",
-       y = "Standardized Frequency of Emergence",
-       title = "Standardized Emergence by Time") +
-  theme(text = element_text(size = 24),
-        axis.text.x = element_text(size = 18, angle = 30, hjust = 1),
-        axis.text.y = element_text(size = 18))
-```
-
-#### Figure 6: heatmap for genetic background of E484 clades
+#### THESIS FIG 6: heatmap for genetic background of E484 clades
 
 ```{r}
 # find which variant each clade belongs to
@@ -1142,20 +757,38 @@ key_mut_K %>%
         legend.title = element_text(size = 12, vjust = 0.8))
 ```
 
+#### ASR of key mutations N501, N:R203 and N:G204
+
+```{r}
+# ASR, clade identification, emergence identification
+
+# structure of output:
+#   $nodeAA - character vector of AA state on tips & at nodes
+#   $clade - data frame of tips specifying which clade they belong to
+#   $emerge - data frame of emergence/ ancestor nodes (reference + mutated)
+N501 <- find.clade("S:N501", "N")
+R203 <- find.clade("N:R203", "R")
+G204 <- find.clade("N:G204", "G")
+```
+
+
+### Phylogenetic Trees
+
 #### Aesthetics for plotting phylogenetic trees
 ```{r}
 # a data frame for all tips and nodes, with E484, N501, G204, R203 status
 tip_and_node <- cbind(1:(length(tree$tip.label) + tree$Nnode),
-                      E484_tip_and_node, N501_tip_and_node,
-                      G204_tip_and_node, R203_tip_and_node) %>% 
+                      E484$nodeAA, N501$nodeAA,
+                      G204$nodeAA, R203$nodeAA) %>% 
                 data.frame()
-names(tip_and_node) <- c("tip_node", names(tip_and_node)[-1])
+names(tip_and_node) <- c("tip_node", "E484", "N501", "G204", "R203")
 tip_and_node$tip_node <- as.numeric(tip_and_node$tip_node)
 
-summary(as.factor(tip_and_node$E484_tip_and_node))
-summary(as.factor(tip_and_node$N501_tip_and_node))
-summary(as.factor(tip_and_node$G204_tip_and_node))
-summary(as.factor(tip_and_node$R203_tip_and_node))
+# check
+summary(as.factor(tip_and_node$E484))
+summary(as.factor(tip_and_node$N501))
+summary(as.factor(tip_and_node$G204))
+summary(as.factor(tip_and_node$R203))
 
 # data set of all edges: time (edge length), E484 & (S:N501, N:G204R, N:R203K) states
 edge_all <- data.frame(tree$edge)
@@ -1167,42 +800,43 @@ edge_all <- edge_all %>%
                                     time == 0 ~ 0.0000000001, # (time=0) -> 0.0000000001
                                     TRUE ~ time)) %>%
             mutate(time = 365 * time) # change unit from year to day
+
 # add mutation info for the start and end nodes of the edges
 edge_all <- edge_all %>% 
-            mutate(E484_start = E484_tip_and_node[start]) %>% 
-            mutate(E484_end = E484_tip_and_node[end]) %>%
-            mutate(N501_start = N501_tip_and_node[start]) %>%
-            mutate(N501_end = N501_tip_and_node[end]) %>%
-            mutate(G204_start = G204_tip_and_node[start]) %>% 
-            mutate(G204_end = G204_tip_and_node[end]) %>%
-            mutate(R203_start = R203_tip_and_node[start]) %>%
-            mutate(R203_end = R203_tip_and_node[end])
+            mutate(E484_start = E484$nodeAA[start]) %>% 
+            mutate(E484_end = E484$nodeAA[end]) %>%
+            mutate(N501_start = N501$nodeAA[start]) %>%
+            mutate(N501_end = N501$nodeAA[end]) %>%
+            mutate(G204_start = G204$nodeAA[start]) %>% 
+            mutate(G204_end = G204$nodeAA[end]) %>%
+            mutate(R203_start = R203$nodeAA[start]) %>%
+            mutate(R203_end = R203$nodeAA[end])
 
 # define the color of tips and nodes by E484 or N501 substitution
 tip_and_node <- tip_and_node %>% 
-                mutate(color_E484 = case_when(E484_tip_and_node == "A" ~ "blueviolet",
-                                              E484_tip_and_node == "E" ~ "black",
-                                              E484_tip_and_node == "K" ~ "brown3",
-                                              E484_tip_and_node == "Q" ~ "goldenrod2")) %>%
-                mutate(tip_E484 = case_when(E484_tip_and_node == "A" ~ "blueviolet",
-                                              E484_tip_and_node == "E" ~ "gray50",
-                                              E484_tip_and_node == "K" ~ "brown3",
-                                              E484_tip_and_node == "Q" ~ "goldenrod2")) %>%
-                mutate(color_N501 = case_when(N501_tip_and_node == "N" ~ "gray50",
-                                              N501_tip_and_node == "S" ~ "darkorchid",
-                                              N501_tip_and_node == "T" ~ "darkolivegreen4",
-                                              N501_tip_and_node == "Y" ~ "steelblue2")) %>%
-                mutate(color_G204 = case_when(G204_tip_and_node == "-" ~ "beige",
-                                              G204_tip_and_node == "G" ~ "gray50",
-                                              G204_tip_and_node == "L" ~ "darkorchid",
-                                              G204_tip_and_node == "P" ~ "darkolivegreen4",
-                                              G204_tip_and_node == "R" ~ "steelblue2")) %>%
-                mutate(color_R203 = case_when(R203_tip_and_node == "-" ~ "beige",
-                                              R203_tip_and_node == "I" ~ "darkorchid",
-                                              R203_tip_and_node == "K" ~ "steelblue2",
-                                              R203_tip_and_node == "M" ~ "darkolivegreen4",
-                                              R203_tip_and_node == "R" ~ "gray50",
-                                              R203_tip_and_node == "S" ~ "aquamarine4"))
+                mutate(color_E484 = case_when(E484 == "A" ~ "blueviolet",
+                                              E484 == "E" ~ "black",
+                                              E484 == "K" ~ "brown3",
+                                              E484 == "Q" ~ "goldenrod2")) %>%
+                mutate(tip_E484 = case_when(E484 == "A" ~ "blueviolet",
+                                              E484 == "E" ~ "gray50",
+                                              E484 == "K" ~ "brown3",
+                                              E484 == "Q" ~ "goldenrod2")) %>%
+                mutate(color_N501 = case_when(N501 == "N" ~ "gray50",
+                                              N501 == "S" ~ "darkorchid",
+                                              N501 == "T" ~ "darkolivegreen4",
+                                              N501 == "Y" ~ "steelblue2")) %>%
+                mutate(color_G204 = case_when(G204 == "-" ~ "beige",
+                                              G204 == "G" ~ "gray50",
+                                              G204 == "L" ~ "darkorchid",
+                                              G204 == "P" ~ "darkolivegreen4",
+                                              G204 == "R" ~ "steelblue2")) %>%
+                mutate(color_R203 = case_when(R203 == "-" ~ "beige",
+                                              R203 == "I" ~ "darkorchid",
+                                              R203 == "K" ~ "steelblue2",
+                                              R203 == "M" ~ "darkolivegreen4",
+                                              R203 == "R" ~ "gray50",
+                                              R203 == "S" ~ "aquamarine4"))
 
 # define the color of edges by E484 or N501 clade
 edge_all <- edge_all %>%
@@ -1230,10 +864,10 @@ edge_all <- edge_all %>%
                                                 TRUE ~ "gray50"))
 
 # E484-mutated tips
-E484_mut_tip <- which(E484_tip_and_node[1:length(tree$tip.label)] != "E")
+E484_mut_tip <- which(E484$nodeAA[1:length(tree$tip.label)] != "E")
 ```
 
-#### Figure 2
+#### THESIS FIG 3
 
 ```{r}
 # plot phylogenetic tree colored by E484 clades
@@ -1242,8 +876,8 @@ plot(tree, type = "phylogram", direction = "right", show.tip.label = FALSE,
      tip.color = tip_and_node$color_E484[1:3442])
 tiplabels(tip = c(1:3442), 
           col = tip_and_node$tip_E484[1:3442], pch = 20, cex = 0.5)
-nodelabels(node = emerge$ancestor_node[-1], 
-           col = tip_and_node$color_E484[emerge$ancestor_node[-1]], 
+nodelabels(node = E484$emerge$ancestor_node[-1], 
+           col = tip_and_node$color_E484[E484$emerge$ancestor_node[-1]], 
            pch = 4, cex =3)
 # nodelabels(node = c(E484_emerge$ancestor_node, 3691), 
 #            col = tip_and_node$color_E484[c(E484_emerge$ancestor_node, 3691)], 
@@ -1261,7 +895,7 @@ legend("topleft", inset = c(0, 0), cex = 0.8, bty = "n",
        legend = c("E", "E484K", "E484Q"))
 ```
 
-#### Figure 7
+#### THESIS FIG 7
 
 ```{r}
 # plot phylogenetic tree colored by N501 clades
@@ -1270,11 +904,11 @@ plot(tree, type = "phylogram", direction = "right", show.tip.label = FALSE,
      tip.color = tip_and_node$color_E484[1:3442])
 tiplabels(tip = c(1:3442), 
           col = tip_and_node$tip_E484[1:3442], pch = 20, cex = 0.5)
-nodelabels(node = emerge$ancestor_node[-1], 
-           col = tip_and_node$color_E484[emerge$ancestor_node[-1]], 
+nodelabels(node = E484$emerge$ancestor_node[-1], 
+           col = tip_and_node$color_E484[E484$emerge$ancestor_node[-1]], 
            pch = 4, cex =3)
-nodelabels(node = unique(clade_N501$ancestor_node)[-1], 
-           col = tip_and_node$color_N501[unique(clade_N501$ancestor_node)[-1]], 
+nodelabels(node = unique(N501$clade$ancestor_node)[-1], 
+           col = tip_and_node$color_N501[unique(N501$clade$ancestor_node)[-1]], 
            pch = 3, cex = 2)
 legend("topleft", inset = c(0.16, 0), cex = 0.8, bty = "n",
        col = c("black", "gray50", "blueviolet", "brown3", "goldenrod2"), 
@@ -1289,62 +923,7 @@ legend("topleft", inset = c(0, 0), cex = 0.8, bty = "n",
        legend = c("N", "N501Y"))
 ```
 
-#### odds ratio of E484K on nodes with other mutations
-
-```{r}
-# numerator is number of emergence (nodes & tips) = E484K
-# denominator is number of nodes that are N501Y & N501 & E484K clade ancestral nodes
-
-# for the denominator, find and exclude the set of nodes & tips that are either:
-# (1) E484A or E484Q = 1 + 26 = 27 nodes & tips
-exclude_E484 <- tip_and_node %>% filter(E484_tip_and_node %in% c("A", "Q")) %>% .$tip_node
-# (2) descendants of E484K emergence (not the ancestor of an E484K clade)
-# for each E484K ancestral node, find its descendant that's also E484K
-for (ancestor in ancestor_K){
-  for (descendant in Descendants(tree, ancestor, type = "all")){
-    if (tip_and_node$E484_tip_and_node[descendant] == "K"){
-      exclude_E484 <- c(exclude_E484, descendant)
-    }
-  }
-}
-exclude_E484 <- setdiff(exclude_E484, 
-                        E484_emerge$ancestor_node[which(E484_emerge$ancestor_state == "K")])
-length(exclude_E484) # 905 nodes excluded; denominator only has E484 and E484K ancestral node
-
-# N501Y & N501 background
-N501.node.fisher <- tip_and_node %>% 
-                    filter(!(tip_node %in% exclude_E484)) %>%
-                    filter(N501_tip_and_node %in% c("N", "Y")) %>% 
-                    # further exclude nodes & tips not N501 or N501Y
-                    select(E484_tip_and_node, N501_tip_and_node) %>%
-                    table() # 5328 nodes & tips left
-
-# G204R & G204 background
-G204.node.fisher <- tip_and_node %>% 
-                    filter(!(tip_node %in% exclude_E484)) %>%
-                    filter(G204_tip_and_node %in% c("G", "R")) %>% 
-                    # further exclude nodes & tips not G204 or G204R
-                    select(E484_tip_and_node, G204_tip_and_node) %>%
-                    table() # 5265 nodes & tips left
-
-# R203K & R203 background
-R203.node.fisher <- tip_and_node %>% 
-                    filter(!(tip_node %in% exclude_E484)) %>%
-                    filter(R203_tip_and_node %in% c("R", "K")) %>% 
-                    # further exclude nodes & tips not N501 or N501Y
-                    select(E484_tip_and_node, R203_tip_and_node) %>%
-                    table() # 3138 nodes & tips left
-
-# fisher's exact test
-#               unexposed   exposed
-# ref (484E)        a          b
-# mut (484-sub)     c          d
-fisher.test(N501.node.fisher)
-fisher.test(G204.node.fisher)
-fisher.test(R203.node.fisher)
-```
-
-#### Figure S1: phylogenetic tree with edges colored by R203 clades
+#### THESIS FIG S1
 
 ```{r}
 # plot phylogenetic tree colored by R203 clades
@@ -1353,11 +932,11 @@ plot(tree, type = "phylogram", direction = "right", show.tip.label = FALSE,
      tip.color = tip_and_node$color_E484[1:3442])
 tiplabels(tip = c(1:3442), 
           col = tip_and_node$tip_E484[1:3442], pch = 20, cex = 0.5)
-nodelabels(node = emerge$ancestor_node[-1], 
-           col = tip_and_node$color_E484[emerge$ancestor_node[-1]], 
+nodelabels(node = E484$emerge$ancestor_node[-1], 
+           col = tip_and_node$color_E484[E484$emerge$ancestor_node[-1]], 
            pch = 4, cex =3)
-nodelabels(node = unique(clade_R203$ancestor_node)[-14], 
-           col = tip_and_node$color_R203[unique(clade_R203$ancestor_node)[-14]], 
+nodelabels(node = unique(R203$clade$ancestor_node)[-14], 
+           col = tip_and_node$color_R203[unique(R203$clade$ancestor_node)[-14]], 
            pch = 3, cex = 2)
 legend("topleft", inset = c(0.16, 0), cex = 0.8, bty = "n",
        col = c("black", "gray50", "blueviolet", "brown3", "goldenrod2"), 
@@ -1373,7 +952,7 @@ legend("topleft", inset = c(0, 0), cex = 0.8, bty = "n",
        legend = c("R", "R203K", "R203M"))
 ```
 
-#### Figure S2: phylogenetic tree with edges colored by G204 clades
+#### THESIS FIG S2
 
 ```{r}
 # plot phylogenetic tree colored by G204 clades
@@ -1382,11 +961,11 @@ plot(tree, type = "phylogram", direction = "right", show.tip.label = FALSE,
      tip.color = tip_and_node$color_E484[1:3442])
 tiplabels(tip = c(1:3442), 
           col = tip_and_node$tip_E484[1:3442], pch = 20, cex = 0.5)
-nodelabels(node = emerge$ancestor_node[-1], 
-           col = tip_and_node$color_E484[emerge$ancestor_node[-1]], 
+nodelabels(node = E484$emerge$ancestor_node[-1], 
+           col = tip_and_node$color_E484[E484$emerge$ancestor_node[-1]], 
            pch = 4, cex =3)
-nodelabels(node = unique(clade_G204$ancestor_node)[-2], 
-           col = tip_and_node$color_G204[unique(clade_G204$ancestor_node)[-2]], 
+nodelabels(node = unique(G204$clade$ancestor_node)[-2], 
+           col = tip_and_node$color_G204[unique(G204$clade$ancestor_node)[-2]], 
            pch = 3, cex = 2)
 legend("topleft", inset = c(0.16, 0), cex = 0.8, bty = "n",
        col = c("black", "gray50", "blueviolet", "brown3", "goldenrod2"), 
@@ -1402,9 +981,71 @@ legend("topleft", inset = c(0, 0), cex = 0.8, bty = "n",
        legend = c("G", "G204L", "G204P", "G204R"))
 ```
 
-#### Figure S3a: correlation matrix of E484 clades (by within-clade proportion of other mutations)
+
+### Epistasis with S:N501Y, S:R203K, N:G204R
+
+#### odds ratio of E484K on nodes with other mutations
 
 ```{r}
+# numerator is number of emergence (nodes & tips) = E484K
+# denominator is number of nodes that are N501Y & N501 & E484K clade ancestral nodes
+
+# for the denominator, find and exclude the set of nodes & tips that are either:
+# (1) E484A or E484Q = 1 + 26 = 27 nodes & tips
+exclude_E484 <- tip_and_node %>% filter(E484 %in% c("A", "Q")) %>% .$tip_node
+# (2) descendants of E484K emergence (not the ancestor of an E484K clade)
+# for each E484K ancestral node, find its descendant that's also E484K
+for (ancestor in ancestor_K){
+  for (descendant in Descendants(tree, ancestor, type = "all")){
+    if (tip_and_node$E484[descendant] == "K"){
+      exclude_E484 <- c(exclude_E484, descendant)
+    }
+  }
+}
+exclude_E484 <- setdiff(exclude_E484, 
+                        E484_emerge$ancestor_node[which(E484_emerge$ancestor_state == "K")])
+length(exclude_E484) # 905 nodes excluded; denominator only has E484 and E484K ancestral node
+
+# N501Y & N501 background
+N501.node.fisher <- tip_and_node %>% 
+                    filter(!(tip_node %in% exclude_E484)) %>%
+                    filter(N501 %in% c("N", "Y")) %>% 
+                    # further exclude nodes & tips not N501 or N501Y
+                    select(E484, N501) %>%
+                    table() # 5328 nodes & tips left
+
+# R203K & R203 background
+R203.node.fisher <- tip_and_node %>% 
+                    filter(!(tip_node %in% exclude_E484)) %>%
+                    filter(R203 %in% c("R", "K")) %>% 
+                    # further exclude nodes & tips not N501 or N501Y
+                    select(E484, R203) %>%
+                    table() # 3138 nodes & tips left
+
+# G204R & G204 background
+G204.node.fisher <- tip_and_node %>% 
+                    filter(!(tip_node %in% exclude_E484)) %>%
+                    filter(G204 %in% c("G", "R")) %>% 
+                    # further exclude nodes & tips not G204 or G204R
+                    select(E484, G204) %>%
+                    table() # 5265 nodes & tips left
+
+# fisher's exact test
+#               unexposed   exposed
+# ref (484E)        a          b
+# mut (484-sub)     c          d
+fisher.test(N501.node.fisher)
+fisher.test(R203.node.fisher)
+fisher.test(G204.node.fisher)
+```
+
+### Sensitivity Analysis
+
+#### THESIS FIG S3a
+
+```{r}
+# correlation matrix of E484 clades (by within-clade proportion of other mutations)
+
 # only proportions, no names
 key_mut_matrix <- key_mut_K %>%
                   full_join(key_mut_other, by = "single") %>%
@@ -1419,14 +1060,15 @@ corrplot(cor(key_mut_matrix), method = "color", order = "original",
          tl.cex = 1.2, cl.cex = 1.2, tl.col="black")
 ```
 
-#### Figure S3b: sub-phylogenetic tree from node 3611 (clades 3712 and 3681 embedded)
+#### THESIS FIG S3b
 
 ```{r}
+# sub-phylogenetic tree from node 3611 (clades 3712 and 3681 embedded)
+
 # extract subtrees from node 3611
 subtree_3611 <- extract.clade(tree, 3611)
 subtree_3611
 length(subtree_3611$tip.label) + subtree_3611$Nnode # 276
-# plot(subtree_3611)
 
 # match tree and sub-tree
 sub_tip_and_node <- data.frame("tip_node" = c(3611, Descendants(tree, 3611, type = "all")),
@@ -1436,8 +1078,8 @@ sub_tip_and_node <- inner_join(sub_tip_and_node, tip_and_node, by = "tip_node")
 sub_edge_all <- data.frame(subtree_3611$edge)
 colnames(sub_edge_all) <- c("sub_start", "sub_end")
 sub_edge_all <- sub_edge_all %>%
-                mutate(E484_start = sub_tip_and_node$E484_tip_and_node[sub_start]) %>%
-                mutate(E484_end = sub_tip_and_node$E484_tip_and_node[sub_end]) %>%
+                mutate(E484_start = sub_tip_and_node$E484[sub_start]) %>%
+                mutate(E484_end = sub_tip_and_node$E484[sub_end]) %>%
                 mutate(edge_color_E484K = case_when((E484_start == "K" & E484_end == "K") ~
                                                      "brown3",
                                                     (E484_start == "Q" & E484_end == "Q") ~ 
@@ -1451,8 +1093,8 @@ plot(subtree_3611, type = "phylogram", direction = "right", show.tip.label = FAL
 tiplabels(tip = c(1:149), 
           col = sub_tip_and_node$tip_E484[1:149], pch = 20, cex = 0.5)
 nodelabels(node = sub_tip_and_node$sub_tip_node[which(sub_tip_and_node$tip_node %in%
-                                                        emerge$ancestor_node)], 
-           col = sub_tip_and_node$color_E484[sub_tip_and_node$sub_tip_node[which(sub_tip_and_node$tip_node %in% emerge$ancestor_node)]], 
+                                                        E484$emerge$ancestor_node)], 
+           col = sub_tip_and_node$color_E484[sub_tip_and_node$sub_tip_node[which(sub_tip_and_node$tip_node %in% E484$emerge$ancestor_node)]], 
            pch = 4, cex =3)
 nodelabels(node = c(150, 251, 220), 
            col = "brown3", 
@@ -1469,3 +1111,5 @@ legend("topleft", inset = c(0, 0), cex = 0.8, bty = "n",
        col = c("gray50", "brown3", "goldenrod2"), lty = c(1, 1), lwd = 2, 
        legend = c("E", "E484K", "E484Q"))
 ```
+
+### END OF RESULTS FOR THESIS
