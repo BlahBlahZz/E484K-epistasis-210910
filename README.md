@@ -1,5 +1,7 @@
 # E484K-epistasis-210910
 
+Data and code used in the master's thesis of Jiabao (Lily) Zhong.
+
 ### Data
 1. nextstrain_210910.svg.zip: screenshot of NextStrain SARS-CoV-2 subsample phylogenetic tree, downloaded on 09/10/2021 from [https://nextstrain.org/ncov/gisaid/global/all-time]
    -- figure 1
